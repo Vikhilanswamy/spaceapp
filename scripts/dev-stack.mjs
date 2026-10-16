@@ -374,8 +374,17 @@ export class DevStackRunner {
    * @param {string} opencodeVersion - Version of opencode-ai to install.
    */
   async installOpenCode(opencodeVersion) {
-    const opencodeBin = join(this.vendorDir, "node_modules/.bin/opencode");
-    if (!existsSync(opencodeBin)) {
+    const opencodePkgPath = join(this.vendorDir, "node_modules/opencode-ai/package.json");
+    let needsInstall = true;
+    if (existsSync(opencodePkgPath)) {
+      try {
+        const pkg = JSON.parse(await readFile(opencodePkgPath, "utf8"));
+        if (pkg.version === opencodeVersion) {
+          needsInstall = false;
+        }
+      } catch {}
+    }
+    if (needsInstall) {
       process.stdout.write(`Installing pinned opencode-ai@${opencodeVersion} into ${this.vendorDir}...\n`);
       await runStreaming("npm", ["install", "--prefix", this.vendorDir, "--prefer-offline", "--no-audit", "--no-fund", `opencode-ai@${opencodeVersion}`]);
     }
@@ -800,6 +809,7 @@ exec opencode "$@"
         await execDocker(["compose", "-p", this.composeProject, "-f", this.composeFile, "down", "-v", "--remove-orphans"]);
       } catch (err) {
         process.stderr.write(`Docker compose down -v failed: ${err.message}\n`);
+        throw err;
       }
     }
     const cliSocketPath = this.resolveCliSocketPath();
@@ -824,8 +834,8 @@ exec opencode "$@"
     await this.initMemory();
     await this.installOpenCode(opencodeVersion);
     await this.startDocker(images);
-    await this.runMigrations(databaseUrl);
     await this.buildWorkspacePackages();
+    await this.runMigrations(databaseUrl);
     await this.startServices({ databaseUrl, setupToken, sessionSecret });
   }
 }

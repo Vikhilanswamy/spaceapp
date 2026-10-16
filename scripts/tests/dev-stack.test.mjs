@@ -110,7 +110,7 @@ test("dev:stack lifecycle: start -> /readyz -> owner setup -> cli pane -> reset"
     const sessionBody = await sessionRes.json();
     const session = sessionBody.session || sessionBody;
     assert.ok(
-      ["RUNNING", "READY", "ATTACHED"].includes(session.status) || session.statusReason?.includes("session"),
+      ["RUNNING", "READY", "ATTACHED", "IDLE"].includes(session.status),
       `CLI session status expected to be active, got ${session.status}`
     );
 
