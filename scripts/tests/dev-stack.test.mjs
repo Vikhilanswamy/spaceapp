@@ -109,9 +109,10 @@ test("dev:stack lifecycle: start -> /readyz -> owner setup -> cli pane -> reset"
     assert.equal(sessionRes.status, 200);
     const sessionBody = await sessionRes.json();
     const session = sessionBody.session || sessionBody;
-    assert.ok(session.sessionId, "CLI session should be allocated");
-    assert.ok(["RUNNING", "READY", "ATTACHED"].includes(session.status) || session.statusReason?.includes("session") || Boolean(session.sessionId),
-      `CLI session status expected to be active, got ${session.status}`);
+    assert.ok(
+      ["RUNNING", "READY", "ATTACHED"].includes(session.status) || session.statusReason?.includes("session"),
+      `CLI session status expected to be active, got ${session.status}`
+    );
 
     // 6. Test reset
     await runner.reset();

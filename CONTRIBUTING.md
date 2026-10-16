@@ -111,6 +111,23 @@ Every service binds to `127.0.0.1` only and avoids colliding with an installed o
 | Compose Project | `spaceapp-dev` | `SPACE_DEV_COMPOSE_PROJECT` |
 | State Directory | `.dev-stack/` | `SPACE_DEV_STACK_DIR` |
 
+### Package building & incremental cache
+
+`npm run dev:stack` automatically inspects source modification times (`mtime`) across `packages/*/src` and `apps/*/src` against compiled `dist/` artifacts. Only modified packages are rebuilt on launch.
+
+- **Force rebuild all packages**:
+  ```sh
+  SPACE_DEV_FORCE_BUILD=true npm run dev:stack
+  ```
+- **Skip package builds** (e.g. if code was built in another session):
+  ```sh
+  SPACE_DEV_SKIP_BUILD=true npm run dev:stack
+  ```
+- **Rebuild an individual package**:
+  ```sh
+  npm run build -w @space/contracts
+  ```
+
 ### Platform notes
 
 - **Linux**: Native Docker and Unix domain sockets are used directly.

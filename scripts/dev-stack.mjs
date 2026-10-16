@@ -2,7 +2,7 @@
 import { spawn, execFile, execFileSync } from "node:child_process";
 import { randomBytes, createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
@@ -13,6 +13,11 @@ const execFileAsync = promisify(execFile);
 const scriptPath = fileURLToPath(import.meta.url);
 const repoRoot = resolve(dirname(scriptPath), "..");
 
+/**
+ * Extracts pinned Docker images for postgres and temporal from compose.yml template.
+ * @param {string} composeContent - Raw compose.yml file content.
+ * @returns {{ postgres: string, temporal: string }} Pinned image references.
+ */
 export function extractPinnedImages(composeContent) {
   const lines = composeContent.split(/\r?\n/);
   let currentService = null;
@@ -37,6 +42,11 @@ export function extractPinnedImages(composeContent) {
   };
 }
 
+/**
+ * Extracts pinned opencode-ai version string from Dockerfile.
+ * @param {string} dockerfileContent - Raw Dockerfile content.
+ * @returns {string} Pinned opencode-ai semantic version.
+ */
 export function extractPinnedOpenCode(dockerfileContent) {
   const match = dockerfileContent.match(/opencode-ai@([0-9.]+)/);
   if (!match) {
@@ -45,6 +55,11 @@ export function extractPinnedOpenCode(dockerfileContent) {
   return match[1];
 }
 
+/**
+ * Ensures directory exists with specific POSIX permissions.
+ * @param {string} path - Directory path.
+ * @param {number} mode - Octal permission mode.
+ */
 async function ensureDir(path, mode = 0o700) {
   await mkdir(path, { recursive: true, mode });
   try {
@@ -52,6 +67,11 @@ async function ensureDir(path, mode = 0o700) {
   } catch {}
 }
 
+/**
+ * Writes secret value to a file with strict 0600 POSIX permissions.
+ * @param {string} filePath - Target secret file path.
+ * @param {string} value - Secret value string.
+ */
 async function writeSecret(filePath, value) {
   await writeFile(filePath, value.trim() + "\n", { mode: 0o600, flag: "w" });
   try {
@@ -59,6 +79,36 @@ async function writeSecret(filePath, value) {
   } catch {}
 }
 
+/**
+ * Recursively scans directory and returns the newest file modification time in ms.
+ * @param {string} dir - Directory to scan.
+ * @returns {Promise<number>} Newest mtime in milliseconds, or 0 if empty/nonexistent.
+ */
+async function getNewestSourceMtime(dir) {
+  let newest = 0;
+  if (!existsSync(dir)) return newest;
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const subMtime = await getNewestSourceMtime(fullPath);
+        if (subMtime > newest) newest = subMtime;
+      } else if (entry.isFile()) {
+        const stats = await stat(fullPath);
+        if (stats.mtimeMs > newest) newest = stats.mtimeMs;
+      }
+    }
+  } catch {}
+  return newest;
+}
+
+/**
+ * Polls a TCP port until a connection succeeds or timeout is reached.
+ * @param {string} host - Target host.
+ * @param {number} port - Target port.
+ * @param {number} timeoutMs - Timeout in milliseconds.
+ */
 async function waitForTcpPort(host, port, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -85,6 +135,12 @@ async function waitForTcpPort(host, port, timeoutMs = 60_000) {
   throw new Error(`Timed out waiting for port ${host}:${port}`);
 }
 
+/**
+ * Polls an HTTP endpoint until status is 200 and predicate evaluates to true.
+ * @param {string} url - Target URL.
+ * @param {(body: any) => boolean} predicate - Validation predicate.
+ * @param {number} timeoutMs - Timeout in milliseconds.
+ */
 async function waitForHttpOk(url, predicate = (body) => body?.ok === true, timeoutMs = 90_000) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
@@ -103,6 +159,11 @@ async function waitForHttpOk(url, predicate = (body) => body?.ok === true, timeo
   throw new Error(`Timed out waiting for HTTP OK at ${url}${lastBody ? ` (last response: ${JSON.stringify(lastBody)})` : ""}${lastError ? `: ${lastError.message}` : ""}`);
 }
 
+/**
+ * Executes a Docker command with max buffer.
+ * @param {string[]} args - Docker CLI arguments.
+ * @param {object} options - execFile options.
+ */
 async function execDocker(args, options = {}) {
   try {
     return await execFileAsync("docker", args, { maxBuffer: 100 * 1024 * 1024, ...options });
@@ -114,6 +175,12 @@ async function execDocker(args, options = {}) {
   }
 }
 
+/**
+ * Spawns child process streaming stdout and stderr to parent stdio.
+ * @param {string} cmd - Executable name.
+ * @param {string[]} args - Command arguments.
+ * @param {object} options - Spawn options.
+ */
 function runStreaming(cmd, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: "inherit", ...options });
@@ -125,6 +192,11 @@ function runStreaming(cmd, args, options = {}) {
   });
 }
 
+/**
+ * Generates Docker compose YAML content for PostgreSQL and Temporal services.
+ * @param {object} params - Parameters object.
+ * @returns {string} Generated compose YAML string.
+ */
 export function generateComposeYaml({ images, postgresPort, temporalPort, composeProject, secretsDir }) {
   return `services:
   postgres:
@@ -166,7 +238,7 @@ export function generateComposeYaml({ images, postgresPort, temporalPort, compos
     secrets:
       - postgres-password
     healthcheck:
-      test: ["CMD-SHELL", "temporal operator cluster health --address 127.0.0.1:7233 >/dev/null && temporal operator namespace describe --namespace default --address 127.0.0.1:7233 >/dev/null"]
+      test: ["CMD-SHELL", "temporal operator cluster health --address temporal:7233 >/dev/null && temporal operator namespace describe --namespace default --address temporal:7233 >/dev/null"]
       interval: 3s
       timeout: 3s
       retries: 35
@@ -181,6 +253,10 @@ volumes:
 }
 
 export class DevStackRunner {
+  /**
+   * Initializes dev stack runner configuration and directory paths.
+   * @param {object} [options={}] - Configuration options and environment overrides.
+   */
   constructor(options = {}) {
     this.env = options.env ?? process.env;
     this.repoRoot = options.repoRoot ?? repoRoot;
@@ -204,6 +280,10 @@ export class DevStackRunner {
     this.isMain = Boolean(options.isMain ?? (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)));
   }
 
+  /**
+   * Reads compose template and Dockerfile to dynamically resolve pinned images and versions.
+   * @returns {Promise<{ images: { postgres: string, temporal: string }, opencodeVersion: string }>} Pinned versions.
+   */
   async readTemplates() {
     const composeTemplatePath = resolve(this.repoRoot, "packages/run-spaceapp/templates/compose.yml");
     const composeContent = await readFile(composeTemplatePath, "utf8");
@@ -214,6 +294,9 @@ export class DevStackRunner {
     return { images, opencodeVersion };
   }
 
+  /**
+   * Initializes all required directories with strict POSIX permissions.
+   */
   async initDirs() {
     await ensureDir(this.stateDir, 0o700);
     await ensureDir(this.secretsDir, 0o700);
@@ -227,6 +310,10 @@ export class DevStackRunner {
     await ensureDir(join(this.stateDir, "providers/opencode"), 0o700);
   }
 
+  /**
+   * Generates or loads secrets with 0600 permissions.
+   * @returns {Promise<{ pgPassword: string, databaseUrl: string, setupToken: string, sessionSecret: string }>} Generated secrets.
+   */
   async initSecrets() {
     const pgPassPath = join(this.secretsDir, "postgres-password");
     let pgPassword;
@@ -264,6 +351,9 @@ export class DevStackRunner {
     return { pgPassword, databaseUrl, setupToken, sessionSecret };
   }
 
+  /**
+   * Copies starter memory seed documents into isolated memory directory.
+   */
   async initMemory() {
     const starterDir = resolve(this.repoRoot, "starter-memory");
     const files = ["gemini_history.md", "gemini_history_monthly.md", "installation-guide.md", "AGENTS.md"];
@@ -279,6 +369,10 @@ export class DevStackRunner {
     }
   }
 
+  /**
+   * Installs pinned opencode CLI in vendor folder and creates the parity wrapper.
+   * @param {string} opencodeVersion - Version of opencode-ai to install.
+   */
   async installOpenCode(opencodeVersion) {
     const opencodeBin = join(this.vendorDir, "node_modules/.bin/opencode");
     if (!existsSync(opencodeBin)) {
@@ -356,6 +450,10 @@ exec opencode "$@"
     } catch {}
   }
 
+  /**
+   * Generates compose YAML, boots PostgreSQL and Temporal containers, and waits for healthchecks.
+   * @param {{ postgres: string, temporal: string }} images - Pinned image digests.
+   */
   async startDocker(images) {
     const composeContent = generateComposeYaml({
       images,
@@ -376,6 +474,7 @@ exec opencode "$@"
     await waitForTcpPort("127.0.0.1", this.temporalPort, 90_000);
 
     const deadline = Date.now() + 90_000;
+    let servicesHealthy = false;
     while (Date.now() < deadline) {
       const { stdout } = await execDocker(["compose", "-p", this.composeProject, "-f", this.composeFile, "ps", "--format", "json"]);
       try {
@@ -383,16 +482,24 @@ exec opencode "$@"
         const statuses = lines.map((l) => JSON.parse(l));
         const pg = statuses.find((s) => s.Service === "postgres" || s.Name?.includes("postgres"));
         const temp = statuses.find((s) => s.Service === "temporal" || s.Name?.includes("temporal"));
-        const pgHealth = pg?.Health || pg?.Status || "";
-        const tempHealth = temp?.Health || temp?.Status || "";
-        if ((pgHealth.includes("healthy") || pgHealth.includes("running")) && (tempHealth.includes("healthy") || tempHealth.includes("running"))) {
+        const pgHealth = (pg?.Health || pg?.Status || "").toLowerCase();
+        const tempHealth = (temp?.Health || temp?.Status || "").toLowerCase();
+        if (pgHealth.includes("healthy") && !pgHealth.includes("unhealthy") && tempHealth.includes("healthy") && !tempHealth.includes("unhealthy")) {
+          servicesHealthy = true;
           break;
         }
       } catch {}
       await new Promise((r) => setTimeout(r, 1000));
     }
+    if (!servicesHealthy) {
+      throw new Error("Docker services (PostgreSQL, Temporal) failed to become healthy within 90s deadline");
+    }
   }
 
+  /**
+   * Applies database migrations via npm run db:migrate.
+   * @param {string} databaseUrl - Target PostgreSQL connection string.
+   */
   async runMigrations(databaseUrl) {
     process.stdout.write("Running database migrations...\n");
     await runStreaming("npm", ["run", "db:migrate"], {
@@ -401,48 +508,87 @@ exec opencode "$@"
     });
   }
 
+  /**
+   * Builds workspace packages with incremental source mtime caching.
+   * Scans package src directories and only rebuilds modified packages.
+   */
   async buildWorkspacePackages() {
     if (this.env.SPACE_DEV_SKIP_BUILD === "true" || this.env.SPACE_DEV_SKIP_BUILD === "1") {
       process.stdout.write("Skipping workspace package builds (SPACE_DEV_SKIP_BUILD is set).\n");
       return;
     }
-    const keyArtifacts = [
-      "packages/contracts/dist/index.js",
-      "packages/streaming/dist/index.js",
-      "packages/browser-host/dist/index.js",
-      "packages/opencode-control/dist/index.js",
-      "packages/memory-graph/dist/index.js",
-      "packages/cli-host/dist/main.js",
-      "packages/codex-app-server/dist/index.js",
-      "packages/runtime/dist/index.js",
-      "packages/db/dist/index.js",
-      "packages/gateway/dist/index.js",
-      "apps/worker/dist/worker.js"
+
+    const forceBuild = this.env.SPACE_DEV_FORCE_BUILD === "true" || this.env.SPACE_DEV_FORCE_BUILD === "1";
+
+    const packages = [
+      { name: "@space/contracts", dir: "packages/contracts", dist: "packages/contracts/dist/index.js" },
+      { name: "@space/icons", dir: "packages/icons", dist: "packages/icons/dist/index.js", marker: true },
+      { name: "@space/streaming", dir: "packages/streaming", dist: "packages/streaming/dist/index.js" },
+      { name: "@space/browser-host", dir: "packages/browser-host", dist: "packages/browser-host/dist/index.js" },
+      { name: "@space/opencode-control", dir: "packages/opencode-control", dist: "packages/opencode-control/dist/index.js" },
+      { name: "@space/memory-graph", dir: "packages/memory-graph", dist: "packages/memory-graph/dist/index.js" },
+      { name: "@space/cli-host", dir: "packages/cli-host", dist: "packages/cli-host/dist/main.js" },
+      { name: "@space/codex-app-server", dir: "packages/codex-app-server", dist: "packages/codex-app-server/dist/index.js" },
+      { name: "@space/runtime", dir: "packages/runtime", dist: "packages/runtime/dist/index.js" },
+      { name: "@space/db", dir: "packages/db", dist: "packages/db/dist/index.js" },
+      { name: "@space/gateway", dir: "packages/gateway", dist: "packages/gateway/dist/index.js" },
+      { name: "@space/worker", dir: "apps/worker", dist: "apps/worker/dist/worker.js" }
     ];
-    const allBuilt = keyArtifacts.every((file) => existsSync(resolve(this.repoRoot, file)));
-    if (allBuilt && this.env.SPACE_DEV_FORCE_BUILD !== "true") {
-      process.stdout.write("Workspace packages are already built. Skipping build (use SPACE_DEV_FORCE_BUILD=true to force rebuild).\n");
+
+    const packagesToRebuild = [];
+
+    for (const pkg of packages) {
+      const distPath = resolve(this.repoRoot, pkg.dist);
+      const srcDir = resolve(this.repoRoot, pkg.dir, "src");
+      if (forceBuild || !existsSync(distPath)) {
+        packagesToRebuild.push(pkg);
+        continue;
+      }
+      try {
+        const distStat = await stat(distPath);
+        const newestSrcMtime = await getNewestSourceMtime(srcDir);
+        if (newestSrcMtime > distStat.mtimeMs) {
+          packagesToRebuild.push(pkg);
+        }
+      } catch {
+        packagesToRebuild.push(pkg);
+      }
+    }
+
+    if (packagesToRebuild.length === 0) {
+      process.stdout.write("Workspace packages are up to date. Skipping build (use SPACE_DEV_FORCE_BUILD=true to force rebuild).\n");
       return;
     }
-    process.stdout.write("Building workspace packages...\n");
-    const packagesToBuild = [
-      "@space/contracts", "@space/icons", "@space/streaming",
-      "@space/browser-host",
-      "@space/opencode-control", "@space/memory-graph",
-      "@space/cli-host", "@space/codex-app-server",
-      "@space/runtime", "@space/db", "@space/gateway", "@space/worker"
-    ];
-    for (const pkg of packagesToBuild) {
-      await runStreaming("npm", ["run", "build", "-w", pkg], { cwd: this.repoRoot });
+
+    process.stdout.write(`Building ${packagesToRebuild.length} workspace packages (${packagesToRebuild.map((p) => p.name).join(", ")})...\n`);
+    for (const pkg of packagesToRebuild) {
+      await runStreaming("npm", ["run", "build", "-w", pkg.name], { cwd: this.repoRoot });
+      if (pkg.marker) {
+        const markerPath = resolve(this.repoRoot, pkg.dist);
+        await ensureDir(dirname(markerPath), 0o755);
+        await writeFile(markerPath, "// @space/icons dist marker\nexport * from '../src/app-icons.js';\n");
+      }
     }
   }
 
+  /**
+   * Resolves safe Unix domain socket path for CLI host (keeping below byte limits).
+   * @returns {string} Safe absolute socket path.
+   */
   resolveCliSocketPath() {
     const candidate = join(this.runDir, "cli-host.sock");
     if (Buffer.byteLength(candidate) <= 90) return candidate;
     return `/tmp/space-dev-${createHash("sha256").update(this.stateDir).digest("hex").slice(0, 8)}.sock`;
   }
 
+  /**
+   * Spawns a background service with isolated environment and prefixed logs.
+   * @param {string} name - Service identifier.
+   * @param {string} command - Binary or executable path.
+   * @param {string[]} args - Command line arguments.
+   * @param {object} [extraEnv={}] - Additional environment variables.
+   * @returns {import("node:child_process").ChildProcess} Spawned child process.
+   */
   spawnService(name, command, args, extraEnv = {}) {
     const child = spawn(command, args, {
       cwd: this.repoRoot,
@@ -481,6 +627,11 @@ exec opencode "$@"
     return child;
   }
 
+  /**
+   * Spawns CLI host, Temporal worker, API server, and Vite web dev server.
+   * Waits for /readyz endpoint and displays owner startup banner.
+   * @param {object} params - Credentials and database URL.
+   */
   async startServices({ databaseUrl, setupToken, sessionSecret }) {
     const cliSocketPath = this.resolveCliSocketPath();
     try {
@@ -576,6 +727,10 @@ exec opencode "$@"
     process.stdout.write(banner);
   }
 
+  /**
+   * Gracefully terminates all running child processes.
+   * @param {number} [exitCode=0] - Process exit code.
+   */
   stop(exitCode = 0) {
     if (this.stopping) return;
     this.stopping = true;
@@ -592,6 +747,9 @@ exec opencode "$@"
     }
   }
 
+  /**
+   * Stops dev stack child services and tears down Docker containers.
+   */
   async down() {
     this.stopping = true;
     process.stdout.write(`Stopping dev stack services (project: ${this.composeProject})...\n`);
@@ -630,6 +788,9 @@ exec opencode "$@"
     process.stdout.write("Dev stack stopped cleanly.\n");
   }
 
+  /**
+   * Completely tears down Docker containers, deletes named volumes, and purges state directory.
+   */
   async reset() {
     this.stopping = true;
     process.stdout.write(`Resetting dev stack: removing containers, volumes, and state directory...\n`);
@@ -652,6 +813,9 @@ exec opencode "$@"
     process.stdout.write("Dev stack reset complete. No containers, volumes, or state directories remain.\n");
   }
 
+  /**
+   * Orchestrates the complete bootstrap lifecycle of the SpaceApp development stack.
+   */
   async start() {
     this.stopping = false;
     const { images, opencodeVersion } = await this.readTemplates();
@@ -703,8 +867,10 @@ Environment overrides:
   SPACE_WEB_PORT              Web Vite port bound to 127.0.0.1 (default: 4921)
 `);
   } else {
-    await runner.start().catch((err) => {
+    await runner.start().catch(async (err) => {
+      process.exitCode = 1;
       process.stderr.write(`[dev:stack] Launch failed: ${err.message}\n`);
+      await runner.down().catch(() => {});
       runner.stop(1);
     });
   }
