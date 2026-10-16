@@ -315,6 +315,7 @@ export class DevStackRunner {
     await ensureDir(join(this.stateDir, "demos"), 0o755);
     await ensureDir(join(this.stateDir, "projects"), 0o755);
     await ensureDir(join(this.stateDir, "var/demo-projects"), 0o755);
+    await ensureDir(join(this.stateDir, "var/opencode-chat-state"), 0o700);
     await ensureDir(join(this.stateDir, "providers/opencode"), 0o700);
   }
 
@@ -677,7 +678,8 @@ exec opencode "$@"
       SPACE_ARTIFACT_ROOT: this.artifactsDir,
       SPACE_MEMORY_GRAPH_ROOT: this.memoryGraphDir,
       SPACE_TELEGRAM_SECRET_ROOT: join(this.secretsDir, "telegram"),
-      SPACE_STREAMING_SECRET_ROOT: join(this.stateDir, "var/streaming-secrets")
+      SPACE_STREAMING_SECRET_ROOT: join(this.stateDir, "var/streaming-secrets"),
+      SPACE_OPENCODE_CHAT_STATE_ROOT: join(this.stateDir, "var/opencode-chat-state")
     });
 
     const tsxCli = resolve(this.repoRoot, "node_modules/tsx/dist/cli.mjs");
