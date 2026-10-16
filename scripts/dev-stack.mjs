@@ -307,6 +307,14 @@ export class DevStackRunner {
     await ensureDir(this.memoryDir, 0o700);
     await ensureDir(this.memoryGraphDir, 0o700);
     await ensureDir(this.artifactsDir, 0o700);
+    await ensureDir(join(this.stateDir, "var/app-diagnostics"), 0o755);
+    await ensureDir(join(this.stateDir, "var/streaming-secrets"), 0o700);
+    await ensureDir(join(this.secretsDir, "telegram"), 0o700);
+    await ensureDir(join(this.stateDir, "var/maintenance-autopilot"), 0o755);
+    await ensureDir(join(this.stateDir, "var/cli-account-balancer"), 0o755);
+    await ensureDir(join(this.stateDir, "demos"), 0o755);
+    await ensureDir(join(this.stateDir, "projects"), 0o755);
+    await ensureDir(join(this.stateDir, "var/demo-projects"), 0o755);
     await ensureDir(join(this.stateDir, "providers/opencode"), 0o700);
   }
 
@@ -665,7 +673,11 @@ exec opencode "$@"
       SPACE_DATABASE_URL: databaseUrl,
       SPACE_TEMPORAL_ADDRESS: `127.0.0.1:${this.temporalPort}`,
       SPACE_TEMPORAL_NAMESPACE: "default",
-      SPACE_TEMPORAL_TASK_QUEUE: "space-agent-turns"
+      SPACE_TEMPORAL_TASK_QUEUE: "space-agent-turns",
+      SPACE_ARTIFACT_ROOT: this.artifactsDir,
+      SPACE_MEMORY_GRAPH_ROOT: this.memoryGraphDir,
+      SPACE_TELEGRAM_SECRET_ROOT: join(this.secretsDir, "telegram"),
+      SPACE_STREAMING_SECRET_ROOT: join(this.stateDir, "var/streaming-secrets")
     });
 
     const tsxCli = resolve(this.repoRoot, "node_modules/tsx/dist/cli.mjs");
@@ -699,7 +711,17 @@ exec opencode "$@"
       SPACEAPP_WORKFLOWS_ENABLED: "true",
       SPACE_PUBLIC_DISTRIBUTION: "true",
       SPACE_BROWSER_SESSIONS_ENABLED: "false",
-      SPACE_INSTALL_ROOT: this.repoRoot
+      SPACE_INSTALL_ROOT: this.repoRoot,
+      SPACE_APP_DIAGNOSTICS_ROOT: join(this.stateDir, "var/app-diagnostics"),
+      SPACE_STREAMING_SECRET_ROOT: join(this.stateDir, "var/streaming-secrets"),
+      SPACE_TELEGRAM_SECRET_ROOT: join(this.secretsDir, "telegram"),
+      SPACE_MAINTENANCE_AUTOPILOT_STATE_FILE: join(this.stateDir, "var/maintenance-autopilot/state.json"),
+      SPACE_CLI_ACCOUNT_BALANCER_STATE_FILE: join(this.stateDir, "var/cli-account-balancer/state.json"),
+      SPACE_DEMO_PROJECTS_ROOT: join(this.stateDir, "demos"),
+      SPACE_PROJECTS_ROOT: join(this.stateDir, "projects"),
+      SPACE_DEMO_PROJECTS_VAR_ROOT: join(this.stateDir, "var/demo-projects"),
+      SPACE_OPENCODE_CHAT_STATE_ROOT: join(this.stateDir, "var/opencode-chat-state"),
+      SPACE_OPENCODE_CHAT_CONTROL: join(this.stateDir, "var/opencode-space-chat-control.json")
     });
 
     process.stdout.write(`Starting Vite web dev server (port: ${this.webPort})...\n`);

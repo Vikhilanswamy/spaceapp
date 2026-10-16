@@ -17,6 +17,21 @@ test("DevStackRunner extracts pinned container images and opencode version from 
   assert.match(opencodeVersion, /^[0-9]+\.[0-9]+\.[0-9]+$/);
 });
 
+test("DevStackRunner isolates state directories and eliminates /opt/spaceapp dependency", async () => {
+  const testStateDir = join(process.cwd(), ".dev-stack-hermetic-test");
+  const runner = new DevStackRunner({ stateDir: testStateDir });
+  try {
+    await runner.initDirs();
+    assert.ok(existsSync(join(testStateDir, "var/app-diagnostics")), "app-diagnostics dir must be isolated");
+    assert.ok(existsSync(join(testStateDir, "var/streaming-secrets")), "streaming-secrets dir must be isolated");
+    assert.ok(existsSync(join(testStateDir, "secrets/telegram")), "telegram secrets dir must be isolated");
+    assert.ok(existsSync(join(testStateDir, "demos")), "demos dir must be isolated");
+  } finally {
+    const { rm } = await import("node:fs/promises");
+    await rm(testStateDir, { recursive: true, force: true });
+  }
+});
+
 test("dev:stack lifecycle: start -> /readyz -> owner setup -> cli pane -> reset", { timeout: 600_000 }, async () => {
   const testStateDir = join(process.cwd(), ".dev-stack-test-suite");
   const testProject = "spaceapp-dev-test";
