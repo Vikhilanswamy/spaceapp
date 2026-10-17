@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { DevStackRunner, extractPinnedImages, extractPinnedOpenCode } from "../dev-stack.mjs";
+import { DevStackRunner, assertSafeStateDir, extractPinnedImages, extractPinnedOpenCode } from "../dev-stack.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -15,6 +15,16 @@ test("DevStackRunner extracts pinned container images and opencode version from 
   assert.match(images.postgres, /^pgvector\/pgvector:.*@sha256:[0-9a-f]{64}$/);
   assert.match(images.temporal, /^temporalio\/auto-setup:.*@sha256:[0-9a-f]{64}$/);
   assert.match(opencodeVersion, /^[0-9]+\.[0-9]+\.[0-9]+$/);
+});
+
+test("assertSafeStateDir prevents destructive operations on critical directories", async () => {
+  const { homedir } = await import("node:os");
+  const { parse, resolve } = await import("node:path");
+  const root = parse(process.cwd()).root;
+  assert.throws(() => assertSafeStateDir(root, process.cwd()), /filesystem root/);
+  assert.throws(() => assertSafeStateDir(homedir(), process.cwd()), /user home directory/);
+  assert.throws(() => assertSafeStateDir(process.cwd(), process.cwd()), /repository root/);
+  assert.throws(() => assertSafeStateDir(resolve(process.cwd(), ".."), process.cwd()), /parent directory of repository/);
 });
 
 test("DevStackRunner isolates state directories and eliminates /opt/spaceapp dependency", async () => {

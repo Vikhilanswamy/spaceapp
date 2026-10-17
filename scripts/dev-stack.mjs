@@ -4,7 +4,8 @@ import { randomBytes, createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -53,6 +54,37 @@ export function extractPinnedOpenCode(dockerfileContent) {
     throw new Error("Failed to extract pinned opencode-ai version from Dockerfile");
   }
   return match[1];
+}
+
+/**
+ * Asserts that a state directory path is safe and does not target critical system or repo locations.
+ * @param {string} stateDir - Target state directory path to validate.
+ * @param {string} repoRootPath - Absolute path to repository root.
+ * @returns {string} Absolute resolved path of the validated state directory.
+ * @throws {Error} If stateDir resolves to root, homedir, repo root, or a parent of repo root.
+ */
+export function assertSafeStateDir(stateDir, repoRootPath) {
+  if (!stateDir || typeof stateDir !== "string") {
+    throw new Error("State directory path must be a non-empty string");
+  }
+  const resolved = resolve(stateDir);
+  const root = parse(resolved).root;
+  if (resolved === root) {
+    throw new Error(`Refusing to use filesystem root as state directory: ${stateDir}`);
+  }
+  const home = homedir();
+  if (resolved === resolve(home)) {
+    throw new Error(`Refusing to use user home directory as state directory: ${stateDir}`);
+  }
+  const resolvedRepo = resolve(repoRootPath);
+  if (resolved === resolvedRepo) {
+    throw new Error(`Refusing to use repository root as state directory: ${stateDir}`);
+  }
+  const relFromStateToRepo = relative(resolved, resolvedRepo);
+  if (!relFromStateToRepo.startsWith("..") && !isAbsolute(relFromStateToRepo) && relFromStateToRepo !== "") {
+    throw new Error(`Refusing to use parent directory of repository as state directory: ${stateDir}`);
+  }
+  return resolved;
 }
 
 /**
@@ -260,7 +292,10 @@ export class DevStackRunner {
   constructor(options = {}) {
     this.env = options.env ?? process.env;
     this.repoRoot = options.repoRoot ?? repoRoot;
-    this.stateDir = options.stateDir ?? (this.env.SPACE_DEV_STACK_DIR ? resolve(this.repoRoot, this.env.SPACE_DEV_STACK_DIR) : resolve(this.repoRoot, ".dev-stack"));
+    this.stateDir = assertSafeStateDir(
+      options.stateDir ?? (this.env.SPACE_DEV_STACK_DIR ? resolve(this.repoRoot, this.env.SPACE_DEV_STACK_DIR) : resolve(this.repoRoot, ".dev-stack")),
+      this.repoRoot
+    );
     this.composeProject = options.composeProject ?? (this.env.SPACE_DEV_COMPOSE_PROJECT || "spaceapp-dev");
     this.postgresPort = Number.parseInt(this.env.SPACE_DEV_POSTGRES_PORT || "5433", 10);
     this.temporalPort = Number.parseInt(this.env.SPACE_DEV_TEMPORAL_PORT || "7234", 10);
@@ -743,6 +778,23 @@ exec opencode "$@"
     process.stdout.write("Waiting for API readiness (/readyz)...\n");
     await waitForHttpOk(`http://127.0.0.1:${this.apiPort}/readyz`, (body) => body?.ok === true, 90_000);
 
+    let setupTokenDisplay = setupToken;
+    const claimedFile = join(this.secretsDir, "setup-token.claimed");
+    if (existsSync(claimedFile)) {
+      setupTokenDisplay = "Claimed (Owner account already initialized)";
+    } else {
+      try {
+        const statusRes = await fetch(`http://127.0.0.1:${this.apiPort}/api/setup/status`);
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          if (statusData && statusData.setupRequired === false) {
+            setupTokenDisplay = "Claimed (Owner account already initialized)";
+            await writeFile(claimedFile, "claimed\n", "utf8").catch(() => {});
+          }
+        }
+      } catch {}
+    }
+
     const banner = [
       "",
       "================================================================================",
@@ -751,7 +803,7 @@ exec opencode "$@"
       ` Web URL:               http://127.0.0.1:${this.webPort}`,
       ` API URL:               http://127.0.0.1:${this.apiPort}`,
       ` Ready Check:           http://127.0.0.1:${this.apiPort}/readyz`,
-      ` One-Time Setup Token:  ${setupToken}`,
+      ` One-Time Setup Token:  ${setupTokenDisplay}`,
       "",
       " Press Ctrl+C or run 'npm run dev:stack -- down' to stop.",
       "================================================================================",
@@ -826,6 +878,7 @@ exec opencode "$@"
    */
   async reset() {
     this.stopping = true;
+    assertSafeStateDir(this.stateDir, this.repoRoot);
     process.stdout.write(`Resetting dev stack: removing containers, volumes, and state directory...\n`);
     await this.down();
     if (existsSync(this.composeFile)) {
