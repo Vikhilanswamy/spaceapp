@@ -311,6 +311,7 @@ export class DevStackRunner {
     this.artifactsDir = join(this.stateDir, "artifacts");
     this.composeFile = join(this.stateDir, "docker-compose.yml");
     this.children = new Map();
+    this.serviceMonitors = new Map();
     this.stopping = false;
     this.isMain = Boolean(options.isMain ?? (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)));
   }
@@ -656,9 +657,10 @@ exec opencode "$@"
    * @param {string} command - Binary or executable path.
    * @param {string[]} args - Command line arguments.
    * @param {object} [extraEnv={}] - Additional environment variables.
+   * @param {object} [options={}] - Service options such as readiness monitoring.
    * @returns {import("node:child_process").ChildProcess} Spawned child process.
    */
-  spawnService(name, command, args, extraEnv = {}) {
+  spawnService(name, command, args, extraEnv = {}, options = {}) {
     const child = spawn(command, args, {
       cwd: this.repoRoot,
       env: {
@@ -693,7 +695,60 @@ exec opencode "$@"
       }
     });
 
+    if (options.monitorReadiness) {
+      this.monitorServiceReadiness(name, options.monitorReadiness, options.monitorIntervalMs);
+    }
+
     return child;
+  }
+
+  /**
+   * Periodically monitors service health/readiness to detect script failure beneath long-lived watchers.
+   * Preserves hot reload restarts while failing fast if the service permanently stops.
+   * @param {string} name - Service name.
+   * @param {() => Promise<boolean>} checker - Async function returning true when healthy.
+   * @param {number} [intervalMs=3000] - Poll interval.
+   */
+  monitorServiceReadiness(name, checker, intervalMs = 3000) {
+    if (this.serviceMonitors.has(name)) {
+      clearInterval(this.serviceMonitors.get(name));
+    }
+
+    let consecutiveFailures = 0;
+    let initialHealthySeen = false;
+
+    const interval = setInterval(async () => {
+      if (this.stopping) {
+        clearInterval(interval);
+        this.serviceMonitors.delete(name);
+        return;
+      }
+      try {
+        const healthy = await checker();
+        if (healthy) {
+          initialHealthySeen = true;
+          consecutiveFailures = 0;
+        } else if (initialHealthySeen) {
+          consecutiveFailures++;
+          if (consecutiveFailures >= 3) {
+            process.stderr.write(
+              `[dev:stack] Service ${name} stopped or became unhealthy beneath watcher. Stopping dev stack.\n`
+            );
+            clearInterval(interval);
+            this.serviceMonitors.delete(name);
+            this.stop(1);
+          }
+        }
+      } catch {
+        // Transient poll error during hot reload restart
+      }
+    }, intervalMs);
+
+    if (typeof interval?.unref === "function") {
+      interval.unref();
+    }
+
+    this.serviceMonitors.set(name, interval);
   }
 
   /**
@@ -724,17 +779,35 @@ exec opencode "$@"
     const viteCli = resolve(this.repoRoot, "node_modules/vite/bin/vite.js");
 
     process.stdout.write("Starting Temporal worker from source...\n");
-    this.spawnService("worker", process.execPath, [tsxCli, "watch", "apps/worker/src/worker.ts"], {
-      SPACE_DATABASE_URL: databaseUrl,
-      SPACE_TEMPORAL_ADDRESS: `127.0.0.1:${this.temporalPort}`,
-      SPACE_TEMPORAL_NAMESPACE: "default",
-      SPACE_TEMPORAL_TASK_QUEUE: "space-agent-turns",
-      SPACE_ARTIFACT_ROOT: this.artifactsDir,
-      SPACE_MEMORY_GRAPH_ROOT: this.memoryGraphDir,
-      SPACE_TELEGRAM_SECRET_ROOT: join(this.secretsDir, "telegram"),
-      SPACE_STREAMING_SECRET_ROOT: join(this.stateDir, "var/streaming-secrets"),
-      SPACE_OPENCODE_CHAT_STATE_ROOT: join(this.stateDir, "var/opencode-chat-state")
-    });
+    this.spawnService(
+      "worker",
+      process.execPath,
+      [tsxCli, "watch", "apps/worker/src/worker.ts"],
+      {
+        SPACE_DATABASE_URL: databaseUrl,
+        SPACE_TEMPORAL_ADDRESS: `127.0.0.1:${this.temporalPort}`,
+        SPACE_TEMPORAL_NAMESPACE: "default",
+        SPACE_TEMPORAL_TASK_QUEUE: "space-agent-turns",
+        SPACE_ARTIFACT_ROOT: this.artifactsDir,
+        SPACE_MEMORY_GRAPH_ROOT: this.memoryGraphDir,
+        SPACE_TELEGRAM_SECRET_ROOT: join(this.secretsDir, "telegram"),
+        SPACE_STREAMING_SECRET_ROOT: join(this.stateDir, "var/streaming-secrets"),
+        SPACE_OPENCODE_CHAT_STATE_ROOT: join(this.stateDir, "var/opencode-chat-state")
+      },
+      {
+        monitorReadiness: async () => {
+          try {
+            const res = await fetch(`http://127.0.0.1:${this.apiPort}/readyz`, {
+              signal: AbortSignal.timeout(2000)
+            });
+            const body = await res.json().catch(() => null);
+            return body?.dependencies?.worker === "RUNNING";
+          } catch {
+            return false;
+          }
+        }
+      }
+    );
 
     process.stdout.write(`Starting API server in watch mode (port: ${this.apiPort})...\n`);
     this.spawnService("api", process.execPath, [tsxCli, "watch", "apps/api/src/server.ts"], {
@@ -837,6 +910,10 @@ exec opencode "$@"
   stop(exitCode = 0) {
     if (this.stopping) return;
     this.stopping = true;
+    for (const interval of this.serviceMonitors.values()) {
+      clearInterval(interval);
+    }
+    this.serviceMonitors.clear();
     for (const [name, child] of this.children.entries()) {
       try {
         child.kill("SIGTERM");
@@ -855,6 +932,10 @@ exec opencode "$@"
    */
   async down() {
     this.stopping = true;
+    for (const interval of this.serviceMonitors.values()) {
+      clearInterval(interval);
+    }
+    this.serviceMonitors.clear();
     process.stdout.write(`Stopping dev stack services (project: ${this.composeProject})...\n`);
     const pidsFile = join(this.runDir, "pids.json");
     if (existsSync(pidsFile)) {
@@ -897,6 +978,21 @@ exec opencode "$@"
   async reset() {
     this.stopping = true;
     assertSafeStateDir(this.stateDir, this.repoRoot);
+
+    if (existsSync(this.stateDir)) {
+      const markerFile = join(this.stateDir, ".space-dev-stack-marker");
+      try {
+        const entries = await readdir(this.stateDir);
+        if (entries.length > 0 && !existsSync(markerFile)) {
+          throw new Error(
+            `Refusing to delete unowned state directory ${this.stateDir}: missing dev-stack ownership marker (.space-dev-stack-marker)`
+          );
+        }
+      } catch (err) {
+        if (err.message.includes("Refusing to delete")) throw err;
+      }
+    }
+
     process.stdout.write(`Resetting dev stack: removing containers, volumes, and state directory...\n`);
     await this.down();
     if (existsSync(this.composeFile)) {
@@ -913,17 +1009,6 @@ exec opencode "$@"
     } catch {}
 
     if (existsSync(this.stateDir)) {
-      const markerFile = join(this.stateDir, ".space-dev-stack-marker");
-      try {
-        const entries = await readdir(this.stateDir);
-        if (entries.length > 0 && !existsSync(markerFile)) {
-          throw new Error(
-            `Refusing to delete unowned state directory ${this.stateDir}: missing dev-stack ownership marker (.space-dev-stack-marker)`
-          );
-        }
-      } catch (err) {
-        if (err.message.includes("Refusing to delete")) throw err;
-      }
       await rm(this.stateDir, { recursive: true, force: true });
     }
     process.stdout.write("Dev stack reset complete. No containers, volumes, or state directories remain.\n");

@@ -43,18 +43,46 @@ test("DevStackRunner isolates state directories and eliminates /opt/spaceapp dep
 });
 
 test("DevStackRunner enforces ownership marker on existing state directories", async () => {
-  const { mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { mkdir, writeFile, readFile, rm } = await import("node:fs/promises");
   const unownedDir = join(process.cwd(), ".dev-stack-unowned-test");
-  await mkdir(unownedDir, { recursive: true });
+  const runDir = join(unownedDir, "run");
+  await mkdir(runDir, { recursive: true });
   await writeFile(join(unownedDir, "foreign-file.txt"), "important data\n");
+  const dummyPidsFile = join(runDir, "pids.json");
+  await writeFile(dummyPidsFile, JSON.stringify({ "foreign-service": 999999 }), "utf8");
 
   const runner = new DevStackRunner({ stateDir: unownedDir });
   try {
     await assert.rejects(() => runner.initDirs(), /Refusing to initialize/);
     await assert.rejects(() => runner.reset(), /Refusing to delete unowned/);
+    // Confirm rejection leaves resources and dummy pids untouched
+    assert.equal(await readFile(dummyPidsFile, "utf8"), JSON.stringify({ "foreign-service": 999999 }));
+    assert.equal(await readFile(join(unownedDir, "foreign-file.txt"), "utf8"), "important data\n");
   } finally {
     await rm(unownedDir, { recursive: true, force: true });
   }
+});
+
+test("DevStackRunner monitorServiceReadiness detects worker failure beneath watcher and triggers stop", async () => {
+  const runner = new DevStackRunner();
+  let stopCode = null;
+  runner.stop = (code) => {
+    stopCode = code;
+  };
+
+  let callCount = 0;
+  // First call reports healthy, subsequent calls report failure
+  const mockChecker = async () => {
+    callCount++;
+    return callCount === 1;
+  };
+
+  runner.monitorServiceReadiness("worker", mockChecker, 50);
+
+  // Wait for 3 consecutive failures (3 * 50ms = 150ms)
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(stopCode, 1, "runner.stop(1) should have been triggered after consecutive readiness failures");
+  runner.stop();
 });
 
 test("dev:stack lifecycle: start -> /readyz -> owner setup -> cli pane -> reset", { timeout: 600_000 }, async () => {
