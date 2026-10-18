@@ -333,7 +333,23 @@ export class DevStackRunner {
    * Initializes all required directories with strict POSIX permissions.
    */
   async initDirs() {
+    const markerFile = join(this.stateDir, ".space-dev-stack-marker");
+    if (existsSync(this.stateDir)) {
+      try {
+        const entries = await readdir(this.stateDir);
+        if (entries.length > 0 && !existsSync(markerFile)) {
+          throw new Error(
+            `Refusing to initialize dev-stack in unowned directory: ${this.stateDir} already exists and contains files but lacks .space-dev-stack-marker`
+          );
+        }
+      } catch (err) {
+        if (err.message.includes("Refusing to initialize")) throw err;
+      }
+    }
     await ensureDir(this.stateDir, 0o700);
+    if (!existsSync(markerFile)) {
+      await writeFile(markerFile, "spaceapp-dev-stack-owner\n", { mode: 0o600 });
+    }
     await ensureDir(this.secretsDir, 0o700);
     await ensureDir(this.binDir, 0o755);
     await ensureDir(this.vendorDir, 0o755);
@@ -704,8 +720,11 @@ exec opencode "$@"
       await new Promise((r) => setTimeout(r, 200));
     }
 
+    const tsxCli = resolve(this.repoRoot, "node_modules/tsx/dist/cli.mjs");
+    const viteCli = resolve(this.repoRoot, "node_modules/vite/bin/vite.js");
+
     process.stdout.write("Starting Temporal worker from source...\n");
-    this.spawnService("worker", process.execPath, [resolve(this.repoRoot, "apps/worker/dist/worker.js")], {
+    this.spawnService("worker", process.execPath, [tsxCli, "watch", "apps/worker/src/worker.ts"], {
       SPACE_DATABASE_URL: databaseUrl,
       SPACE_TEMPORAL_ADDRESS: `127.0.0.1:${this.temporalPort}`,
       SPACE_TEMPORAL_NAMESPACE: "default",
@@ -716,9 +735,6 @@ exec opencode "$@"
       SPACE_STREAMING_SECRET_ROOT: join(this.stateDir, "var/streaming-secrets"),
       SPACE_OPENCODE_CHAT_STATE_ROOT: join(this.stateDir, "var/opencode-chat-state")
     });
-
-    const tsxCli = resolve(this.repoRoot, "node_modules/tsx/dist/cli.mjs");
-    const viteCli = resolve(this.repoRoot, "node_modules/vite/bin/vite.js");
 
     process.stdout.write(`Starting API server in watch mode (port: ${this.apiPort})...\n`);
     this.spawnService("api", process.execPath, [tsxCli, "watch", "apps/api/src/server.ts"], {
@@ -784,7 +800,9 @@ exec opencode "$@"
       setupTokenDisplay = "Claimed (Owner account already initialized)";
     } else {
       try {
-        const statusRes = await fetch(`http://127.0.0.1:${this.apiPort}/api/setup/status`);
+        const statusRes = await fetch(`http://127.0.0.1:${this.apiPort}/api/setup/status`, {
+          signal: AbortSignal.timeout(5000)
+        });
         if (statusRes.ok) {
           const statusData = await statusRes.json();
           if (statusData && statusData.setupRequired === false) {
@@ -895,6 +913,17 @@ exec opencode "$@"
     } catch {}
 
     if (existsSync(this.stateDir)) {
+      const markerFile = join(this.stateDir, ".space-dev-stack-marker");
+      try {
+        const entries = await readdir(this.stateDir);
+        if (entries.length > 0 && !existsSync(markerFile)) {
+          throw new Error(
+            `Refusing to delete unowned state directory ${this.stateDir}: missing dev-stack ownership marker (.space-dev-stack-marker)`
+          );
+        }
+      } catch (err) {
+        if (err.message.includes("Refusing to delete")) throw err;
+      }
       await rm(this.stateDir, { recursive: true, force: true });
     }
     process.stdout.write("Dev stack reset complete. No containers, volumes, or state directories remain.\n");

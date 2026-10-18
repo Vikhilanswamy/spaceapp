@@ -42,6 +42,21 @@ test("DevStackRunner isolates state directories and eliminates /opt/spaceapp dep
   }
 });
 
+test("DevStackRunner enforces ownership marker on existing state directories", async () => {
+  const { mkdir, writeFile, rm } = await import("node:fs/promises");
+  const unownedDir = join(process.cwd(), ".dev-stack-unowned-test");
+  await mkdir(unownedDir, { recursive: true });
+  await writeFile(join(unownedDir, "foreign-file.txt"), "important data\n");
+
+  const runner = new DevStackRunner({ stateDir: unownedDir });
+  try {
+    await assert.rejects(() => runner.initDirs(), /Refusing to initialize/);
+    await assert.rejects(() => runner.reset(), /Refusing to delete unowned/);
+  } finally {
+    await rm(unownedDir, { recursive: true, force: true });
+  }
+});
+
 test("dev:stack lifecycle: start -> /readyz -> owner setup -> cli pane -> reset", { timeout: 600_000 }, async () => {
   const testStateDir = join(process.cwd(), ".dev-stack-test-suite");
   const testProject = "spaceapp-dev-test";
